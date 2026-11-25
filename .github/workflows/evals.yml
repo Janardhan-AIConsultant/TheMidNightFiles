@@ -1,0 +1,68 @@
+name: LLM evals (PR)
+
+# Runs DeepEval + promptfoo ONLY when something that can change model behaviour changes. Evals call a real LLM
+# (cost + non-determinism), so they are path-filtered and skipped on forks / when no key is configured.
+on:
+  pull_request:
+    paths:
+      - "prompts/**"
+      - "backend/agents/**"
+      - "backend/services/llm_client.py"
+      - "backend/services/story_profile_service.py"
+      - "evals/**"
+      - ".github/workflows/evals.yml"
+  workflow_dispatch:
+
+concurrency:
+  group: evals-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  gate:
+    runs-on: ubuntu-latest
+    outputs:
+      has_key: ${{ steps.k.outputs.has_key }}
+    steps:
+      - id: k
+        env:
+          KEY: ${{ secrets.OPENROUTER_API_KEY }}
+        run: |
+          if [ -n "$KEY" ] && [ "${{ github.event.pull_request.head.repo.fork }}" != "true" ]; then echo "has_key=true" >> "$GITHUB_OUTPUT"; else echo "has_key=false" >> "$GITHUB_OUTPUT"; echo "::notice::No OPENROUTER_API_KEY (or fork PR): LLM evals skipped"; fi
+
+  deepeval:
+    needs: gate
+    if: needs.gate.outputs.has_key == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with: { python-version: "3.11", cache: pip }
+      - run: pip install -r evals/requirements-eval.txt
+      - run: pytest evals -q
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          EVAL_MODEL: ${{ vars.EVAL_MODEL || 'google/gemma-4-31b-it:free' }}
+          DEEPEVAL_TELEMETRY_OPT_OUT: "YES"
+
+  promptfoo:
+    needs: gate
+    if: needs.gate.outputs.has_key == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npx --yes promptfoo@0.126.0 eval -c evals/promptfoo/promptfooconfig.yaml --no-cache -o promptfoo-results.json
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          PROMPTFOO_DISABLE_TELEMETRY: "1"
+          PROMPTFOO_DISABLE_UPDATE: "1"
+          PROMPTFOO_DISABLE_SHARING: "1"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: { name: promptfoo-results, path: promptfoo-results.json, if-no-files-found: ignore }

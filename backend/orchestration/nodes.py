@@ -17,6 +17,7 @@ from backend.models.entities import DistributionContent
 from backend.orchestration.context import WorkflowContext
 from backend.orchestration.graph_state import empty_usage
 from backend.orchestration.workflow_config import REVIEW_STAGES
+from backend.safety import PiiUnavailable
 from backend.services.approval_service import ApprovalError, ApprovalService
 from backend.services.review_service import ReviewError, ReviewService
 from backend.services.series_service import SeriesService
@@ -91,6 +92,43 @@ def series_context(ctx: WorkflowContext, state: dict) -> dict:
         return {}
 
 
+def redact_inbound(ctx: WorkflowContext, text):
+    """Presidio-redact user-supplied text before it reaches an LLM. Fail CLOSED: a broken engine blocks the run."""
+    if not text or ctx.pii is None or not ctx.settings.pii_redaction_enabled:
+        return text
+    try:
+        clean, hits = ctx.pii.redact(str(text))
+    except PiiUnavailable as exc:
+        raise NodeFailure("guardrail", f"PII engine unavailable, refusing to send user text to the model: {exc}")
+    if hits:
+        log.warning("redacted %d PII item(s) from user input (%s)", len(hits), sorted({h.entity for h in hits}))
+    return clean
+
+
+def guard_publish(state, ctx: WorkflowContext) -> None:
+    """Pre-publish gate over the story text AND every distribution payload. Any violation (or gate error) blocks."""
+    if ctx.guard is None:
+        return
+    text, _, _ = load_revision(ctx, state["story_id"], state["version"])
+    problems = [f"story: {v.rule}: {v.message}" for v in ctx.guard.check(text).violations]
+    from sqlalchemy import select
+    with ctx.session_factory() as s:
+        rows = s.scalars(select(DistributionContent).where(
+            DistributionContent.story_id == state["story_id"],
+            DistributionContent.version == state["version"])).all()
+        payloads = {r.platform: dict(r.payload) for r in rows}
+    for plat, payload in payloads.items():
+        for key, val in payload.items():
+            chunks = val if isinstance(val, list) else [val]
+            for c in chunks:
+                if isinstance(c, str) and c.strip():
+                    rep = ctx.guard.check(c)
+                    problems += [f"{plat}.{key}: {v.rule}: {v.message}" for v in rep.violations
+                                 if v.rule != "length"]
+    if problems:
+        raise NodeFailure("guardrail", "blocked by pre-publish guardrails: " + " | ".join(problems[:8]))
+
+
 def _run(ctx, acc, agent_id, payload):
     r = ctx.agents[agent_id].run(payload)
     acc.add_result(r)
@@ -158,7 +196,7 @@ def validate(state, ctx, acc):
 def planner(state, ctx, acc):
     req, profile = state["request"], state["profile"]
     out = _run(ctx, acc, "planner", PlannerInput(
-        topic=req.get("topic"), genre=req.get("genre", "horror"), story_type=profile["profile_name"],
+        topic=redact_inbound(ctx, req.get("topic")), genre=req.get("genre", "horror"), story_type=profile["profile_name"],
         target_word_count=profile["target_words"], platform=req.get("platform"),
         series_mode=bool(req.get("series_mode")), planned_date=req.get("planned_date"),
         calendar_days=int(req.get("calendar_days") or 0), workflow_id=state["workflow_id"]))
@@ -260,7 +298,7 @@ def human_review(state, ctx, acc):
                           "findings": state.get("pending_findings", [])[:20]})
     action = (decision or {}).get("action") if isinstance(decision, dict) else None
     if action == "revise":
-        notes = str(decision.get("notes") or "human reviewer requested revision")
+        notes = str(redact_inbound(ctx, decision.get("notes")) or "human reviewer requested revision")
         finding = {"severity": "high", "issue": notes[:300], "location": "story", "category": "other",
                    "explanation": "requested by human reviewer", "recommendation": notes[:300]}
         return {"human_action": "revise", "human_reason": notes[:300], "revision_target": "writer",
@@ -333,6 +371,7 @@ def _publishing_input(state, ctx, **extra) -> PublishingInput:
 
 
 def readiness(state, ctx, acc):
+    guard_publish(state, ctx)
     out = _run(ctx, acc, "publishing", _publishing_input(state, ctx))
     if not out.ready:
         raise NodeFailure("publishing", "not ready for publishing: " + "; ".join(out.reasons))
@@ -360,6 +399,7 @@ def approval(state, ctx, acc):
 
 def queue(state, ctx, acc):
     stale_guard(ctx, state)
+    guard_publish(state, ctx)  # re-check at hand-off: content may have changed while waiting for approval
     out = _run(ctx, acc, "publishing", _publishing_input(state, ctx, require_approval=True, enqueue=True))
     if not out.ready:
         raise NodeFailure("publishing", "; ".join(out.reasons))

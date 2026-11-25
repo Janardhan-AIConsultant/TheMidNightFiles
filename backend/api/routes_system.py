@@ -139,7 +139,7 @@ def _public_config(s: Settings) -> dict:
     db_url = make_url(s.database_url)
     return {
         "app_env": s.app_env, "app_timezone": s.app_timezone, "llm_provider": s.llm_provider,
-        "openai_model": s.openai_model, "langsmith_tracing": s.langsmith_tracing,
+        "openai_model": s.openai_model, "openrouter_model": s.openrouter_model, "langsmith_tracing": s.langsmith_tracing,
         "langsmith_project": s.langsmith_project, "cache_enabled": s.cache_enabled,
         "cache_backend": s.cache_backend, "cache_default_ttl_seconds": s.cache_default_ttl_seconds,
         "cache_llm_ttl_seconds": s.cache_llm_ttl_seconds, "cache_max_size_mb": s.cache_max_size_mb,
@@ -148,6 +148,8 @@ def _public_config(s: Settings) -> dict:
         "cors_origins": list(s.cors_origins), "database": {"dialect": db_url.get_backend_name()},
         "secrets": {"openai_api_key": {"configured": bool(s.openai_api_key.get_secret_value()),
                                        "value": _mask(s.openai_api_key.get_secret_value())},
+                    "openrouter_api_key": {"configured": bool(s.openrouter_api_key.get_secret_value()),
+                                           "value": _mask(s.openrouter_api_key.get_secret_value())},
                     "langsmith_api_key": {"configured": bool(s.langsmith_api_key.get_secret_value()),
                                           "value": _mask(s.langsmith_api_key.get_secret_value())},
                     "redis_url": {"configured": bool(s.redis_url), "value": _mask(s.redis_url)}},

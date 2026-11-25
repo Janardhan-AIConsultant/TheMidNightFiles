@@ -59,6 +59,8 @@ class WorkflowContext:
     config: WorkflowConfig
     path_manager: Any = None
     queue_port: Optional[PublishingQueuePort] = None
+    pii: Any = None      # backend.safety.PiiService (None = disabled)
+    guard: Any = None    # backend.safety.ContentGuard (None = disabled)
     events: EventBus = field(default_factory=EventBus)
     agent_stats: dict[str, dict] = field(default_factory=dict)
     _lock: threading.Lock = field(default_factory=threading.Lock)
@@ -92,7 +94,7 @@ def build_context(llm: LLMClient | None = None, settings: Settings | None = None
     if cache is None:
         cache = CacheService(settings)
     budget = budget or ContextBudgetService(build_model_registry(settings), settings)
-    agent_config = agent_config or AgentConfig(model_id=settings.openai_model or "gpt-4o")
+    agent_config = agent_config or AgentConfig(model_id=settings.active_model or "gpt-4o")
 
     def current_version(story_id: str) -> int:
         with session_factory() as s:
@@ -109,6 +111,13 @@ def build_context(llm: LLMClient | None = None, settings: Settings | None = None
     for k, v in (extra_tools or {}).items():
         tools.setdefault(k, {}).update(v)
     agents = build_agents(llm, budget, cache, agent_config, tools, tracing)
+    pii = guard = None
+    if settings.guardrails_enabled or settings.pii_redaction_enabled:
+        from backend.safety import ContentGuard, PiiService
+        from backend.safety.pii import shared_detector
+        pii = PiiService(shared_detector(), threshold=settings.pii_score_threshold)
+        guard = ContentGuard(pii=pii) if settings.guardrails_enabled else None
+        pii = pii if settings.pii_redaction_enabled or guard else None
     return WorkflowContext(agents=agents, budget=budget, cache=cache, settings=settings,
                            session_factory=session_factory, config=config or WorkflowConfig.from_settings(settings),
-                           path_manager=path_manager, queue_port=queue_port)
+                           path_manager=path_manager, queue_port=queue_port, pii=pii, guard=guard)
