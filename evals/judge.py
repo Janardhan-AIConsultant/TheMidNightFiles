@@ -22,8 +22,17 @@ class OpenRouterJudge(DeepEvalBaseLLM):
 
     def generate(self, prompt: str, schema=None):
         suffix = "\n\nRespond with ONE valid JSON object only." if schema is not None else ""
-        r = self.load_model().chat.completions.create(
-            model=self._model, temperature=0, messages=[{"role": "user", "content": prompt + suffix}])
+        import time
+        from openai import RateLimitError
+        for attempt in range(4):  # free tiers 429 often; back off 2s, 4s, 8s then let the caller decide
+            try:
+                r = self.load_model().chat.completions.create(
+                    model=self._model, temperature=0, messages=[{"role": "user", "content": prompt + suffix}])
+                break
+            except RateLimitError:
+                if attempt == 3:
+                    raise
+                time.sleep(2 ** (attempt + 1))
         text = r.choices[0].message.content or ""
         return schema(**extract_json(text)) if schema is not None else text
 

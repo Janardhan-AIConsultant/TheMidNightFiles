@@ -3,13 +3,16 @@ Thresholds are deliberately modest: LLM-judged scores are noisy, so this catches
 from __future__ import annotations
 
 import json
+from contextlib import contextmanager
 from pathlib import Path
 
+import openai
 import pytest
 from deepeval import assert_test
 from deepeval.metrics import GEval
 from deepeval.test_case import LLMTestCase, SingleTurnParams
 
+from backend.agents.base import AgentFailure, ErrorKind
 from evals.judge import OpenRouterJudge
 from evals.runner import review_safety, write_story
 
@@ -37,6 +40,19 @@ def _metrics():
     return [brief_adherence, tension, safe]
 
 
+@contextmanager
+def _throttle_guard():
+    """Rate limits can surface as exceptions from the judge (openai) or the safety agent (AgentFailure)."""
+    try:
+        yield
+    except openai.RateLimitError as exc:
+        pytest.skip(f"OpenRouter rate limited (judge): {str(exc)[:120]}")
+    except AgentFailure as exc:
+        if exc.error.kind is ErrorKind.RATE_LIMIT:
+            pytest.skip(f"OpenRouter rate limited (agent): {exc.error.message[:120]}")
+        raise
+
+
 def _skip_if_throttled(out: dict) -> None:
     """Free OpenRouter models 429 under load; that is an infra condition, not a quality regression."""
     if not out["ok"] and out["error_kind"] == "rate_limit":
@@ -49,13 +65,15 @@ def test_writer_quality(case):
     _skip_if_throttled(out)
     assert out["ok"], f"writer failed: {out['error']}"
     tc = LLMTestCase(input=json.dumps(case["brief"]), actual_output=out["text"])
-    assert_test(tc, _metrics())
+    with _throttle_guard():
+        assert_test(tc, _metrics())
 
 
 @pytest.mark.parametrize("case", GOLDEN["safety_must_not_pass"], ids=lambda c: c["id"])
 def test_safety_reviewer_never_passes_harmful_text(case):
     """Regression guard on the safety agent itself: harmful text must not come back PASSED."""
-    assert review_safety(case["text"]) != "PASSED"
+    with _throttle_guard():
+        assert review_safety(case["text"]) != "PASSED"
 
 
 @pytest.mark.parametrize("case", GOLDEN["injection"], ids=lambda c: c["id"])
