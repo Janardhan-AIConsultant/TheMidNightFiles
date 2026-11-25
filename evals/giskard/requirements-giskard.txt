@@ -1,0 +1,3 @@
+# Giskard pulls a large dependency tree; keep it isolated from the app and DeepEval environments.
+-r ../../requirements.txt
+giskard[llm]==2.19.2

@@ -1,4 +1,4 @@
-"""Injectable LLM client protocol, an OpenAI-backed implementation (langchain-openai) and a scripted fake for tests."""
+"""Injectable LLM client protocol, OpenAI/OpenRouter implementations (langchain-openai) and a scripted fake for tests."""
 from __future__ import annotations
 
 import json
@@ -63,6 +63,13 @@ class OpenAILLMClient:
         self._models: dict[tuple, Any] = {}
         self._lock = threading.Lock()
 
+    # Provider hooks (overridden by OpenRouterLLMClient)
+    def _api_key(self) -> str | None:
+        return self.settings.openai_api_key.get_secret_value() or None
+
+    def _extra_kwargs(self) -> dict[str, Any]:
+        return {}
+
     def _model(self, req: LLMRequest):
         key = (req.model, req.max_output_tokens, req.timeout, req.json_output)
         with self._lock:
@@ -72,9 +79,9 @@ class OpenAILLMClient:
                 if req.json_output:
                     kwargs["model_kwargs"] = {"response_format": {"type": "json_object"}}
                 self._models[key] = ChatOpenAI(
-                    model=req.model, api_key=self.settings.openai_api_key.get_secret_value() or None,
+                    model=req.model, api_key=self._api_key(),
                     temperature=self.temperature, max_tokens=req.max_output_tokens, timeout=req.timeout,
-                    max_retries=0, **kwargs)
+                    max_retries=0, **self._extra_kwargs(), **kwargs)
             return self._models[key]
 
     def invoke(self, req: LLMRequest) -> LLMResponse:
@@ -91,6 +98,28 @@ class OpenAILLMClient:
         content = msg.content if isinstance(msg.content, str) else json.dumps(msg.content)
         return LLMResponse(text=content, input_tokens=int(usage.get("input_tokens", 0)),
                            output_tokens=int(usage.get("output_tokens", 0)), model=req.model)
+
+
+class OpenRouterLLMClient(OpenAILLMClient):
+    """OpenRouter via its OpenAI-compatible API. Pilot: only ':free' models unless OPENROUTER_ALLOW_PAID=true.
+
+    Free models are heavily rate limited (HTTP 429 -> LLMRateLimitError) and not all honour JSON mode; the
+    orchestrator's existing retry/parse handling applies unchanged."""
+
+    def _api_key(self) -> str | None:
+        return self.settings.openrouter_api_key.get_secret_value() or None
+
+    def _extra_kwargs(self) -> dict[str, Any]:
+        headers = {"X-Title": self.settings.openrouter_app_name}
+        if self.settings.openrouter_site_url:
+            headers["HTTP-Referer"] = self.settings.openrouter_site_url
+        return {"base_url": self.settings.openrouter_base_url, "default_headers": headers}
+
+    def invoke(self, req: LLMRequest) -> LLMResponse:
+        if not self.settings.openrouter_allow_paid and not req.model.endswith(":free"):
+            raise LLMModelError(f"model {req.model!r} is not a ':free' OpenRouter model "
+                                "(set OPENROUTER_ALLOW_PAID=true to allow paid models)")
+        return super().invoke(req)
 
 
 class FakeLLMClient:
@@ -136,6 +165,8 @@ _KNOWN = [
     ModelSpec("openai", "gpt-4o", 128_000, 16_384, tools=True, structured=True),
     ModelSpec("openai", "gpt-4o-mini", 128_000, 16_384, tools=True, structured=True),
     ModelSpec("openai", "gpt-4.1", 1_047_576, 32_768, tools=True, structured=True),
+    # OpenRouter free pilot model (limits from OpenRouter's public /models listing)
+    ModelSpec("openrouter", "google/gemma-4-31b-it:free", 262_144, 32_768, tools=True, structured=False),
 ]
 
 
@@ -149,6 +180,9 @@ def build_model_registry(settings: Settings | None = None) -> ModelRegistry:
 
 def build_llm_client(settings: Settings | None = None) -> LLMClient:
     s = settings or get_settings()
-    if s.llm_provider.lower() != "openai":
-        raise ValueError(f"unsupported LLM_PROVIDER {s.llm_provider!r}")
-    return OpenAILLMClient(s)
+    provider = s.llm_provider.lower()
+    if provider == "openai":
+        return OpenAILLMClient(s)
+    if provider == "openrouter":
+        return OpenRouterLLMClient(s)
+    raise ValueError(f"unsupported LLM_PROVIDER {s.llm_provider!r}")

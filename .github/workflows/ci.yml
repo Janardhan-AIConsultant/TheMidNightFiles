@@ -15,6 +15,7 @@ jobs:
           python-version: "3.11"
           cache: pip
       - run: pip install -r requirements.txt
+      - run: python -m spacy download en_core_web_sm
       - run: python -m pytest tests -q
         env:
           APP_ENV: test

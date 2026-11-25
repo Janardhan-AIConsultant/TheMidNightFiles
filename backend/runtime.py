@@ -87,7 +87,7 @@ class AppWorkflowService(WorkflowService):
             extra = {"image": {"generate_image": self._image_tool}} if self._image_tool else None
             self._ctx = build_context(llm=self._llm, settings=self._settings,
                                       # the publishing agent makes one queue_job call per platform (+ checks)
-                                      agent_config=AgentConfig(model_id=self._settings.openai_model or "gpt-4o",
+                                      agent_config=AgentConfig(model_id=self._settings.active_model or "gpt-4o",
                                                                max_tool_calls=20), cache=self._cache, budget=self._budget,
                                       path_manager=ContentPathManager(self._settings.data_path / "content"),
                                       queue_port=self._queue_port, extra_tools=extra)

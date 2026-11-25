@@ -101,10 +101,30 @@ Image agent only produces prompts, and the readiness gate stops the workflow wit
 - Reddit jobs are refused until the subreddit rules are acknowledged in the payload (publisher safety check).
 - Real publishing drives a logged-in browser profile via Playwright; captchas/2FA stop the job with a manual
   fallback message. Selectors can break when destination sites change and are only verified against a fake site.
-- LLM provider support is OpenAI only (`LLM_PROVIDER=openai`); context limits for unknown models fall back to
+- LLM providers: OpenAI (`LLM_PROVIDER=openai`) and OpenRouter (`LLM_PROVIDER=openrouter`, `:free` models only unless `OPENROUTER_ALLOW_PAID=true`); context limits for unknown models fall back to
   conservative defaults. Token counts for non-OpenAI tokenizers are estimates.
 - The Redis cache backend is not implemented (filesystem only). SQLite single-node only; the workflow event bus
   is in memory (after a restart the SSE stream starts from a checkpoint snapshot).
 - Workflow list filters (`status`, `story_id`) apply to the returned page; the calendar scheduler does not
   forward a calendar row's free-text `story_type` as a story profile.
 - Frontend lives in `frontend/` and was not modified as part of backend integration.
+
+## Quality & safety pipeline
+
+```
+CI per PR       lint/tests (incl. prompt contracts) -> DeepEval + promptfoo (only if prompts/agents/evals changed)
+CI scheduled    Giskard scan of the agents (nightly, advisory)
+Runtime         source -> Presidio (redact inbound) -> agents (LangSmith traces) -> Guardrails gate -> human approval -> publish
+```
+
+- **Runtime (fail CLOSED):** `backend/safety/`. Presidio redacts PII in user-supplied topics/notes before any LLM call;
+  the guardrail gate re-checks the story and every platform payload at `readiness` and `queue` and blocks on any
+  violation or gate error. PERSON/LOCATION are intentionally not checked (fiction uses invented names).
+  Setup: `pip install -r requirements.txt && python -m spacy download en_core_web_sm`.
+- **Guardrails AI** is used only if its telemetry is off (`guardrails configure --disable-metrics`); otherwise the
+  identical native validators run. LangSmith tracing stays fail-OPEN.
+- **Evals (need `OPENROUTER_API_KEY`, skipped without it):** `evals/` - DeepEval (`pytest evals`), promptfoo
+  (`npx promptfoo@0.126.0 eval -c evals/promptfoo/promptfooconfig.yaml`), Giskard (`python evals/giskard/scan.py`).
+  Install with `evals/requirements-eval.txt` / `evals/giskard/requirements-giskard.txt`. Telemetry is disabled and
+  promptfoo's hosted red-team generator is not used, so no content leaves the runner except to the model provider.
+- Add `OPENROUTER_API_KEY (and optionally an `EVAL_MODEL` repository variable)` as a GitHub Actions secret to enable the eval jobs.

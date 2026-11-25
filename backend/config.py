@@ -28,6 +28,13 @@ class Settings(BaseSettings):
     llm_provider: str = "openai"
     openai_api_key: SecretStr = SecretStr("")
     openai_model: str = ""
+    # OpenRouter (LLM_PROVIDER=openrouter). Pilot uses ":free" models only unless OPENROUTER_ALLOW_PAID=true.
+    openrouter_api_key: SecretStr = SecretStr("")
+    openrouter_model: str = ""
+    openrouter_base_url: str = "https://openrouter.ai/api/v1"
+    openrouter_allow_paid: bool = False
+    openrouter_site_url: str = ""    # optional attribution headers (HTTP-Referer / X-Title)
+    openrouter_app_name: str = "The Midnight Files"
 
     langsmith_tracing: bool = True
     langsmith_api_key: SecretStr = SecretStr("")
@@ -64,6 +71,16 @@ class Settings(BaseSettings):
     image_generator: str = ""  # optional 'package.module:callable' image tool hook (no backend bundled)
     max_revision_attempts: int = 3
     publishing_max_retries: int = 3
+
+    # Runtime safety (Presidio PII + pre-publish guardrail gate). Both fail CLOSED on the publish path.
+    guardrails_enabled: bool = True
+    pii_redaction_enabled: bool = True
+    pii_score_threshold: float = 0.5
+
+    @property
+    def active_model(self) -> str:
+        """Configured model id for the selected provider ('' when unset)."""
+        return self.openrouter_model if self.llm_provider.lower() == "openrouter" else self.openai_model
 
     @field_validator("cors_origins", mode="before")
     @classmethod
@@ -110,14 +127,27 @@ class Settings(BaseSettings):
             problems.append("DEFAULT_MAX_OUTPUT must be < DEFAULT_CONTEXT_LIMIT")
         if self.max_revision_attempts < 1:
             problems.append("MAX_REVISION_ATTEMPTS must be >= 1")
+        if not 0.0 < self.pii_score_threshold <= 1.0:
+            problems.append("PII_SCORE_THRESHOLD must be in (0, 1]")
         if self.publishing_max_retries < 0:
             problems.append("PUBLISHING_MAX_RETRIES must be >= 0")
         prod = self.app_env.lower() == "production"
+        if prod and not (self.guardrails_enabled and self.pii_redaction_enabled):
+            problems.append("GUARDRAILS_ENABLED and PII_REDACTION_ENABLED must be true in production")
         if self.llm_provider == "openai" and prod:
             if not self.openai_api_key.get_secret_value():
                 problems.append("OPENAI_API_KEY required in production")
             if not self.openai_model:
                 problems.append("OPENAI_MODEL required in production")
+        if self.llm_provider.lower() not in {"openai", "openrouter"}:
+            problems.append("LLM_PROVIDER must be 'openai' or 'openrouter'")
+        if self.llm_provider.lower() == "openrouter":
+            if prod and not self.openrouter_api_key.get_secret_value():
+                problems.append("OPENROUTER_API_KEY required in production")
+            if not self.openrouter_model:
+                problems.append("OPENROUTER_MODEL required when LLM_PROVIDER=openrouter")
+            elif not self.openrouter_allow_paid and not self.openrouter_model.endswith(":free"):
+                problems.append("OPENROUTER_MODEL must end with ':free' (set OPENROUTER_ALLOW_PAID=true to use paid models)")
         if self.langsmith_tracing and prod and not self.langsmith_api_key.get_secret_value():
             problems.append("LANGSMITH_API_KEY required when LANGSMITH_TRACING=true in production")
         try:

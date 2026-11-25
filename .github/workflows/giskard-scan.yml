@@ -1,0 +1,47 @@
+name: Giskard scan (scheduled)
+
+# Broad, slow, non-deterministic vulnerability audit of the agents. Advisory: it uploads a report and does not block
+# merges unless you run it manually with fail_on_issues=true.
+on:
+  schedule:
+    - cron: "30 20 * * *"   # 02:00 IST nightly
+  workflow_dispatch:
+    inputs:
+      full_scan: { description: "Run every detector (slower, costlier)", type: boolean, default: false }
+      fail_on_issues: { description: "Fail the job on major issues", type: boolean, default: false }
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Check key
+        id: k
+        env: { KEY: "${{ secrets.OPENROUTER_API_KEY }}" }
+        run: |
+          if [ -n "$KEY" ]; then echo "ok=true" >> "$GITHUB_OUTPUT"; else echo "::notice::No OPENROUTER_API_KEY, Giskard scan skipped"; fi
+      - uses: actions/setup-python@v5
+        if: steps.k.outputs.ok == 'true'
+        with: { python-version: "3.11", cache: pip }
+      - if: steps.k.outputs.ok == 'true'
+        run: pip install -r evals/giskard/requirements-giskard.txt
+      - if: steps.k.outputs.ok == 'true'
+        run: python evals/giskard/scan.py
+        env:
+          OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
+          EVAL_MODEL: ${{ vars.EVAL_MODEL || 'google/gemma-4-31b-it:free' }}
+          GSK_DISABLE_ANALYTICS: "True"
+          GISKARD_FULL: ${{ inputs.full_scan && '1' || '0' }}
+          GISKARD_FAIL_ON_ISSUES: ${{ inputs.fail_on_issues && '1' || '0' }}
+      - uses: actions/upload-artifact@v4
+        if: always() && steps.k.outputs.ok == 'true'
+        with:
+          name: giskard-report
+          path: |
+            evals/giskard/giskard-report.html
+            evals/giskard/giskard-report.json
+          if-no-files-found: ignore
